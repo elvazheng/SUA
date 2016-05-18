@@ -1,10 +1,14 @@
 import glob
+import os
 import pandas as pd
 import numpy as np
-import os
+from scipy import signal
 from datetime import timedelta
 
-PATH = os.getenv('SuaData')
+KPH2MPS = 1/3.6
+G2MPSS = 9.8
+FS = 10
+MINSATELLITES = 4
 
 def read_sub(sub):
     ''' Read all the 10 hz files for one subject
@@ -14,12 +18,15 @@ def read_sub(sub):
     Returns:
     The complete data frame of all a subject's runs is returned
     '''
-    #filenames = glob.glob(PATH + "\*001*\*\data 10hz*.csv")
-    #filenames = glob.glob(PATH + "\*" + sub + "*\*\data 10hz*.csv")
-    filenames = glob.glob(os.path.join(PATH,'*'+sub+'*','*','data 10hz*.csv'))
+    filenames = glob.glob(os.path.join(
+        os.getenv('SuaData'), 
+        '*' + sub + '*', 
+        '*', 
+        'data 10hz*.csv'
+        ))
     frame = pd.DataFrame()
     dflist = [] 
-    count=0
+    
     for filename in filenames:
         print filename
         trip = filename[-8:-4]
@@ -44,19 +51,20 @@ def read_sub(sub):
             'gpsspeed', 'heading', 'pdop', 'hdop', 'vdop','fix_type', 'num_sats', 
             'acc_x', 'acc_y', 'acc_z','throttle', 'obdspeed', 'rpm'],
             keep='first')
-        df=df[df.gpstime.notnull()]
+        df = df[df.gpstime.notnull()]
         #for known problem files, replace the wrong time by gpstime
-        if trip in open('problem files.txt').read():
+        if trip in open('problem_files.txt').read():
             df, numfixed = replace_time(df)
-            count += numfixed
               
-        # add column 'speed' and 'trip', delete 'gpsspeed' and 'obdspeed' 
-        if any(pd.notnull(df.obdspeed)):
-            df['speed']=np.where(df['num_sats']>=4,df.gpsspeed,df.obdspeed)
-        else:
-            df['speed']=df.gpsspeed
+        # combine obd and gps speeds and filter
+        # also derive the longitudinal acceleration and add to df
+        df = filt_speed(df)
+        
+        # pull the trip number from the file name
         df['trip']=df['subject_id'].map(lambda x:trip)   
-        df=df.drop(['gpsspeed','obdspeed'], 1)   
+        
+        # drop the raw variables gpsspeed and obdspeed in favor of derived speed
+        df = df.drop(['gpsspeed','obdspeed'], 1)   
         
         #if less than 60 seconds, delete the file
         if len(df)<=600:
@@ -65,15 +73,15 @@ def read_sub(sub):
             
         dflist.append(df)             
           
+    # combine list of frames into one dataframe
     frame = pd.concat(dflist,axis=0)
     
-    print 'weird rows that time and gpstime not match: ',count,', total final rows: ',len(frame)
-
+    # export dataframe to csv file
     frame.to_csv(os.path.join(os.getenv('SuaProcessed'), 'sub_' + sub + '.csv'), index=None)
     
     #save row count to txt file  
     f=open('countRows.txt','a') 
-    f.write('\nsub_'+sub+'   '+str(len(frame)))
+    f.write('\nsub_' + sub + ', ' + str(len(frame)) + ', ' + str(numfixed))
     return frame
     
 def reject_file(df):
@@ -118,6 +126,27 @@ def replace_time(df):
             df.time.iloc[[ind]] = df.gpstime.iloc[[ind]]
             count +=1 
     return df, count
+
+def filt_speed(df):
+    if any(pd.notnull(df.obdspeed)):
+        speed = np.where(df['num_sats']>=MINSATELLITES,df.gpsspeed,df.obdspeed)
+    else:
+        speed = df.gpsspeed
+
+    # filter speed
+    b,a = signal.butter(2,0.2)
+    speedfilt = signal.filtfilt(b,a,speed)
+    accel = np.diff(speedfilt * KPH2MPS) * FS / G2MPSS
+    accel = np.insert(accel,0,0)
+    df['speed'] = speedfilt
+    df['Ax'] = accel
+    return df
+    
+    #list_gps = df.speed.tolist()
+    #temp_gps_mps = np.array(list_gps) * KPH2MPS
+    #array_gps_mps = signal.filtfilt(b,a,temp_gps_mps)    
+    #array_acc = np.diff(array_gps_mps) * FS / G2MPSS
+    #array_acc = np.insert(array_acc,0,0)
 
 if __name__ == '__main__':
     import timeit
