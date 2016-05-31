@@ -18,6 +18,8 @@ def read_sub(sub):
     Returns:
     The complete data frame of all a subject's runs is returned
     '''
+    print os.getenv('SuaProcessed')
+    global categories
     filenames = glob.glob(os.path.join(
         os.getenv('SuaData'), 
         '*' + sub + '*', 
@@ -28,6 +30,7 @@ def read_sub(sub):
     dflist = [] 
     
     for filename in filenames:
+        categories = []
         print filename
         trip = filename[-8:-4]
         try:
@@ -53,24 +56,38 @@ def read_sub(sub):
             keep='first')
         df = df[df.gpstime.notnull()]
         #for known problem files, replace the wrong time by gpstime
-        if trip in open('problem_files.txt').read():
+        numfixed=0
+        if trip in open('Z:\problem_files.txt').read():  
             df, numfixed = replace_time(df)
               
         # combine obd and gps speeds and filter
         # also derive the longitudinal acceleration and add to df
         df = filt_speed(df)
         
+        #revise heading to make it smoother add to df
+        #also derive the yaw rate and add to df
+        df = add_yaw(df)
+        
         # pull the trip number from the file name
         df['trip']=df['subject_id'].map(lambda x:trip)   
         
         # drop the raw variables gpsspeed and obdspeed in favor of derived speed
-        df = df.drop(['gpsspeed','obdspeed'], 1)   
+        df = df.drop(['gpsspeed','obdspeed'], 1)  
+        
+        #find the reverse variable
+        df = find_reverse(df,indexLeftSP)
+        
+        #reformat the column orders
+        df=df.reindex(columns=['subject_id','time','gpstime','latitude','longitude',
+        'heading','new_heading','yaw_rate','pdop','hdop','vdop','fix_type',
+        'num_sats','acc_x','acc_y','acc_z','throttle','rpm','speed',
+        'Ax','trip','reverse?']) 
         
         #if less than 60 seconds, delete the file
         if len(df)<=600:
             df=df[0:0]
-            print "gps less than 60 sec"
-            
+            print "gps less than 60 sec" 
+           
         dflist.append(df)             
           
     # combine list of frames into one dataframe
@@ -80,10 +97,10 @@ def read_sub(sub):
     frame.to_csv(os.path.join(os.getenv('SuaProcessed'), 'sub_' + sub + '.csv'), index=None)
     
     #save row count to txt file  
-    f=open('countRows.txt','a') 
+    f=open(os.getenv('SuaProcessed')+'countRows.txt','a') 
     f.write('\nsub_' + sub + ', ' + str(len(frame)) + ', ' + str(numfixed))
-    return frame
-    
+    return frame   
+            
 def reject_file(df):
     ''' Reject a file if there is no gps movement '''
     if not(any(pd.notnull(df.gpsspeed))):
@@ -115,21 +132,25 @@ def trim_file(df):
     
 def replace_time(df):
     ''' Replace time for any rows that have missing or repeated data '''
-    count = 0
+    global numfixed
+    numfixed = 0
     for ind in range(len(df)-1):
         delta1=df.gpstime.iloc[[ind]] - df.time.iloc[[ind]]
         delta2=df.time.iloc[[ind]] - df.gpstime.iloc[[ind]]
         if any(delta1 > timedelta(seconds=1.5)):
             df.time.iloc[[ind]] = df.gpstime.iloc[[ind]]
-            count +=1
+            numfixed +=1
         if any(delta2 > timedelta(seconds=1.5)):
             df.time.iloc[[ind]] = df.gpstime.iloc[[ind]]
-            count +=1 
-    return df, count
+            numfixed +=1 
+    return df, numfixed
 
 def filt_speed(df):
     if any(pd.notnull(df.obdspeed)):
         speed = np.where(df['num_sats']>=MINSATELLITES,df.gpsspeed,df.obdspeed)
+        for index in range(len(df)):
+            if pd.isnull(speed[index]):
+                speed[index]=np.array(df.gpsspeed)[index]         
     else:
         speed = df.gpsspeed
 
@@ -140,13 +161,78 @@ def filt_speed(df):
     accel = np.insert(accel,0,0)
     df['speed'] = speedfilt
     df['Ax'] = accel
-    return df
-    
+    return df     
+       
     #list_gps = df.speed.tolist()
     #temp_gps_mps = np.array(list_gps) * KPH2MPS
     #array_gps_mps = signal.filtfilt(b,a,temp_gps_mps)    
     #array_acc = np.diff(array_gps_mps) * FS / G2MPSS
     #array_acc = np.insert(array_acc,0,0)
+
+def add_yaw(df): 
+    b,a = signal.butter(2,0.2)
+    array_heading=np.array(df.heading)
+    countzero=0
+    index_head = 0 
+    
+    #find the first heading and backfill to beginning
+    for index in range(len(df)):
+        if array_heading[index] == 0:
+            countzero+=1
+        else:
+            break
+    if len(df) > countzero:
+        array_heading[:countzero]=array_heading[countzero] 
+        
+    #locate jumps and modify               
+    if array_heading[0]<180:
+        array_heading[0]+=360    
+    while index_head < len(array_heading)-1:
+        if array_heading[index_head]-array_heading[index_head+1]>350:
+            array_heading[index_head+1]+=360
+        index_head+=1
+    df['new_heading']=pd.Series(array_heading,index=df.index)
+    
+    #filt new heading and calculate the yaw rate
+    filt_heading = signal.filtfilt(b,a,array_heading) 
+    yaw = np.diff(filt_heading)
+    yaw = np.insert(yaw,0,0)
+    df['yaw_rate']=pd.Series(yaw,index=df.index) 
+    return df
+
+categories = []
+indexLeftSP = 0
+
+def find_reverse(df,indexLeftSP):
+    array_heading = np.array(df.new_heading)    
+    for index in range(indexLeftSP, len(array_heading)-1):
+        diff = array_heading[index+1]-array_heading[index]
+        if len(categories)==len(array_heading)-1:
+            break
+        if abs(diff)<150 or abs(diff)>210:
+            categories.append(0)
+        else:
+            categories.append(0)
+            countR = 1
+            for sindex in range(index+1,len(array_heading)-1):
+                if abs(array_heading[sindex+1]-array_heading[sindex])<50:
+                    categories.append(1)
+                    countR+=1
+                else:
+                    categories.append(1)
+                    indexLeftSP = countR + index+1  
+                    find_reverse(df, indexLeftSP)                     
+                    return df
+    categories.append(categories[len(array_heading)-2])
+    #Reverse 1 and 0 since forward must be longer than reverse
+    if sum(categories)>len(categories)-sum(categories):
+        for index, item in enumerate(categories):
+            if item == 1:
+                categories[index]=0
+            else:
+                categories[index]=1                                         
+    df['reverse?']=categories           
+    return df
 
 if __name__ == '__main__':
     import timeit
