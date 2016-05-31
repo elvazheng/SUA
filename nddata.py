@@ -10,7 +10,7 @@ G2MPSS = 9.8
 FS = 10
 MINSATELLITES = 4
 
-def read_sub():
+def read_sub(sub):
     ''' Read all the 10 hz files for one subject
     
     Arguments:
@@ -45,22 +45,32 @@ def read_sub():
         except Exception:
             print 'read_csv failed on: ' + filename
             continue
-        if reject_file(df):
+            
+        # check to see that there are valid gps values and the vehicle is moving
+        if missing_gps(df):
             continue
             
         # trim size of file by getting rid of empty rows, duplicates, and null times
         df = trim_file(df)
         df=df.drop_duplicates(subset=['gpstime','latitude','longitude',
             'gpsspeed', 'heading', 'pdop', 'hdop', 'vdop', 'fix_type', 
-			'num_sats', 'acc_x', 'acc_y', 'acc_z','throttle', 'obdspeed', 
-			'rpm'], keep='first')
+            'num_sats', 'acc_x', 'acc_y', 'acc_z','throttle', 'obdspeed', 
+            'rpm'], keep='first')
         df = df[df.gpstime.notnull()]
+        
+        # check that the resulting dataframe is not too short now
+        if too_short(df):
+            continue
+        
         #for known problem files, replace the wrong time by gpstime
         numfixed=0
-        if trip in open((os.path.join(os.getenv('SuaProcessed'),
-			"problem_files.txt"))).read():
-            df, numfixed = replace_time(df)
+        if trip in open("problem_files.txt").read():
+            df, numfixed = replace_time(df,numfixed)
               
+        # check that the resulting dataframe is not too short now
+        if too_short(df):
+            continue
+
         # combine obd and gps speeds and filter
         # also derive the longitudinal acceleration and add to df
         df = filt_speed(df)
@@ -80,15 +90,14 @@ def read_sub():
         
         #reformat the column orders
         df=df.reindex(columns=['subject_id', 'time', 'gpstime', 'latitude',
-			'longitude', 'heading', 'new_heading', 'yaw_rate', 
-			'pdop', 'hdop', 'vdop', 'fix_type', 'num_sats',
-			'acc_x', 'acc_y', 'acc_z', 'throttle', 'rpm', 'speed',
-			'Ax', 'trip', 'reverse?']) 
+            'longitude', 'heading', 'new_heading', 'yaw_rate', 
+            'pdop', 'hdop', 'vdop', 'fix_type', 'num_sats',
+            'acc_x', 'acc_y', 'acc_z', 'throttle', 'rpm', 'speed',
+            'Ax', 'trip', 'reverse?']) 
         
-        #if less than 60 seconds, delete the file
-        if len(df)<=600:
-            df=df[0:0]
-            print "gps less than 60 sec" 
+        # check that the resulting dataframe is not too short now
+        if too_short(df):
+            continue
            
         dflist.append(df)             
           
@@ -96,18 +105,16 @@ def read_sub():
     frame = pd.concat(dflist,axis=0)
     
     # export dataframe to csv file
-    frame.to_csv(os.path.join(os.getenv('SuaProcessed'), 'sub_' + 
-		subjectfile[17:20] + '.csv'), index=None)
+    frame.to_csv(os.path.join(os.getenv('SuaProcessed'), 
+        'sub_' + sub + '.csv'), index=None)
     
     #save row count to txt file  
-	f = open((os.path.join(os.getenv('SuaProcessed'),
-		"countRows.txt")),'a') 
-	f.write('\nsub_' + subjectfile[17:20] + ', ' + str(len(frame)) + 
-		', ' + str(numfixed))
-	f.close()
-	return frame   
+    f = open((os.path.join(os.getenv('SuaProcessed'), "countRows.txt")),'a') 
+    f.write('\nsub_' + sub + ', ' + str(len(frame)) + ', ' + str(numfixed))
+    f.close()
+    return frame   
             
-def reject_file(df):
+def missing_gps(df):
     ''' Reject a file if there is no gps movement '''
     if not(any(pd.notnull(df.gpsspeed))):
         print "gps no values"
@@ -115,11 +122,14 @@ def reject_file(df):
     if max(df.gpsspeed[pd.notnull(df.gpsspeed)]) == 0:
         print "gps not moving"
         return True
-    if len(df.gpsspeed)<=600:
+    return False
+    
+def too_short(df):
+    if len(df.gpstime)<=600:
         print "less than 60 sec"
         return True
     return False
-  
+
 def trim_file(df):
     ''' Trim the beginning and end of a file based on speed '''
     ismovingG = np.where(df.gpsspeed > 0)[0]
@@ -243,4 +253,9 @@ def find_reverse(df,indexLeftSP):
     return df
 
 if __name__ == '__main__':
-	read_sub('001')
+    import cProfile
+    import pstats
+    sub = '014'
+    cProfile.run('read_sub(sub)', 'nddatastats')
+    p = pstats.Stats('nddatastats')
+    p.sort_stats('cumulative').print_stats(10)
